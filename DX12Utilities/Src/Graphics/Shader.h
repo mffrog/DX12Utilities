@@ -93,7 +93,7 @@ namespace Shader {
 		InputLayout(int num) {
 			elements.reserve(num);
 		}
-		void AddElement(const char* semanticName, FormatType fType, size_t count, Classification classification, unsigned short inputSlot = 0);
+		void AddElement(const char* semanticName, FormatType fType, size_t count, Classification classification = Classification_PerVertex, unsigned short inputSlot = 0);
 
 		const D3D12_INPUT_ELEMENT_DESC* GetElements() const {
 			return elements.data();

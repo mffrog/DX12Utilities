@@ -65,10 +65,14 @@ namespace Resource {
 		DXGI_FORMAT GetFormat() const {
 			return format;
 		}
+		float GetDepthClearValue() const { return depthClearValue; }
+		UINT GetStencilClearValue() const { return stencilClearValue; }
 	private:
 		D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle;
 		Microsoft::WRL::ComPtr<ID3D12Resource> resource;
 		DXGI_FORMAT format;
+		float depthClearValue;
+		UINT stencilClearValue;
 	};
 
 
@@ -100,5 +104,24 @@ namespace Resource {
 		uint8_t* pResourcePtr;
 		D3D12_GPU_VIRTUAL_ADDRESS gpuVirtualAddress;
 	};
+
+	//------------------------------------------------------------------------------------------
+	class RenderTarget {
+	public:
+		bool Init(Graphics* graphics, int width, int height, DXGI_FORMAT format, const float* clearColor);
+		Microsoft::WRL::ComPtr<ID3D12Resource> GetResource() { return resource; }
+		const float* GetClearColor() const { return clearColor; }
+		DXGI_FORMAT GetFormat() const { return format; }
+	private:
+		Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+		DXGI_FORMAT format;
+		float clearColor[4];
+	};
+	
+	class RenderTargetDescriptorList : public DescriptorList {
+	public:
+		int AddRenderTargetView(RenderTarget*);
+	};
+
 
 } // namespace Resource

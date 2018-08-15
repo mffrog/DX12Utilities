@@ -9,18 +9,34 @@
 #include "Math/Matrix/Matrix4x4.h"
 struct FrameComponent {
 	CommandAllocator allocator;
+	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
+};
+
+template<int N>
+struct FrameComponentManager {
+	void SetCurrent(int c) { current = c; }
+	D3D12_CPU_DESCRIPTOR_HANDLE GetRTVHandle() {
+		return components[current].rtvHandle;
+	}
+	CommandAllocator* GetCommandAllocator() {
+		return &components[current].allocator;
+	}
+	FrameComponent components[N];
+	int current = 0;
 };
 
 using Mat = mff::Matrix4x4<float>;
+using Vec2 = mff::Vector2<float>;
 using Vec4 = mff::Vector4<float>;
 const int FrameBufferCount = 2;
-FrameComponent frameComponents[FrameBufferCount];
+FrameComponentManager<FrameBufferCount> frameComponent;
+//FrameComponent frameComponents[FrameBufferCount];
 GraphicsCommand graphicsCommand;
 Resource::DepthStencilDescriptorList depthStencilList;
 Resource::DepthStencilBuffer dsBuffer;
 Resource::ResourceDescriptorList resourceDescriptorList;
 Resource::ConstantBuffer constantBuffer;
-int constantId[2] = {-1,-1} ;
+int constantId[2] = { -1,-1 };
 int cDescriptorId[2] = { -1,-1 };
 Shader::GraphicsPipeline pipeline;
 SyncObject sync;
@@ -36,13 +52,45 @@ struct Vertex {
 };
 
 Vertex vertices[] = {
-	{ { 0.0f, 0.5f,0.5f },{ 1.0f,0.0f,0.0f,1.0f }, },
-	{ { 0.5f,-0.5f,0.5f },{ 1.0f,1.0f,0.0f,1.0f }, },
-	{ {-0.5f,-0.5f,0.5f },{ 1.0f,0.0f,1.0f,1.0f }, },
+	{ { 0.0f, 0.5f,0.0f },{ 1.0f,0.0f,0.0f,1.0f }, },
+	{ { 0.5f,-0.5f,0.0f },{ 1.0f,1.0f,0.0f,1.0f }, },
+	{ {-0.5f,-0.5f,0.0f },{ 1.0f,0.0f,1.0f,1.0f }, },
+};
+
+struct PostVertex {
+	Vec4 position;
+	Vec2 texcoord;
+};
+
+PostVertex postVertex[] = {
+	{ { -0.8f, 0.8f,0.0f,1.0f }, {0.0f,0.0f} },
+	{ {  0.8f, 0.8f,0.0f,1.0f }, {1.0f,0.0f} },
+	{ {  0.8f,-0.8f,0.0f,1.0f }, {1.0f,1.0f} },
+	{ { -0.8f,-0.8f,0.0f,1.0f }, {0.0f,1.0f} },
+};
+
+uint32_t postIndices[] = {
+	0,1,2,2,3,0,
 };
 
 Shader::VertexBuffer<Vertex> vertexBuffer;
 Shader::IndexBuffer indexBuffer;
+
+Shader::VertexBuffer<PostVertex> postVertexBuffer;
+Shader::IndexBuffer postIndexBuffer;
+Shader::GraphicsPipeline postPipeline;
+
+Resource::RenderTargetDescriptorList rtDescriptorList;
+struct RenderTarget {
+	Resource::RenderTarget renderTarget;
+	int rtDescriptorId;
+	int resourceDescriptorId;
+};
+Resource::RenderTarget preRenderTarget;
+int preRenderTargetDescriptorId;
+int preRTResourceDescriptorId;
+RenderTarget posRenderTarget;
+
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 bool InitGraphics(HWND hwnd) {
@@ -51,14 +99,16 @@ bool InitGraphics(HWND hwnd) {
 		return 1;
 	}
 
+	int currentFrame = graphics.GetCurrentBackBufferIndex();
+	frameComponent.SetCurrent(currentFrame);
 	for (int i = 0; i < FrameBufferCount; ++i) {
-		if (!frameComponents[i].allocator.Init(&graphics, CommandType::CommandType_Direct)) {
+		if (!frameComponent.components[i].allocator.Init(&graphics, CommandType::CommandType_Direct)) {
 			return false;
 		}
+		frameComponent.components[i].rtvHandle = graphics.GetRTVHandle(i);
 	}
 
-	int currentFrame = graphics.GetCurrentBackBufferIndex();
-	if (!graphicsCommand.Init(&frameComponents[currentFrame].allocator)) {
+	if (!graphicsCommand.Init(frameComponent.GetCommandAllocator())) {
 		return false;
 	}
 
@@ -90,15 +140,15 @@ bool InitGraphics(HWND hwnd) {
 		}
 	}
 	Mat mat = Mat(
-		Vec4(1.0f,0.0f,0.0f,0.0f), 
-		Vec4(0.0f,1.0f,0.0f,0.0f), 
-		Vec4(0.0f,0.0f,1.0f,0.0f), 
-		Vec4(0.0f,0.0f,0.0f,1.0f));
+		Vec4(1.0f, 0.0f, 0.0f, 0.5f),
+		Vec4(0.0f, 1.0f, 0.0f, 0.5f),
+		Vec4(0.0f, 0.0f, 1.0f, 0.0f),
+		Vec4(0.0f, 0.0f, 0.0f, 1.0f));
 	constantBuffer.Update(constantId[0], &mat, sizeof(Mat));
 
 	Shader::InputLayout layout;
-	layout.AddElement("POSITION", Shader::InputLayout::Float, 3, Shader::InputLayout::Classification_PerVertex);
-	layout.AddElement("COLOR", Shader::InputLayout::Float, 4, Shader::InputLayout::Classification_PerVertex);
+	layout.AddElement("POSITION", Shader::InputLayout::Float, 3);
+	layout.AddElement("COLOR", Shader::InputLayout::Float, 4);
 
 	Shader::RootSignatureFactory rsFactory;
 	rsFactory.AddParameterBlock(1, 0);
@@ -110,8 +160,9 @@ bool InitGraphics(HWND hwnd) {
 	psFactory.SetRootSignature(pipeline.rootSignature.Get());
 	DXGI_FORMAT format[] = {
 		DXGI_FORMAT_R8G8B8A8_UNORM,
+		DXGI_FORMAT_R32G32B32A32_FLOAT,
 	};
-	psFactory.SetRenderTargets(1, format);
+	psFactory.SetRenderTargets(_countof(format), format);
 	psFactory.UseDepthStencil(dsBuffer.GetFormat());
 	Shader::Shader vs;
 	if (!vs.LoadShader(L"Res/VertexShader.hlsl", "vs_5_0", "main")) {
@@ -144,6 +195,69 @@ bool InitGraphics(HWND hwnd) {
 	uint32_t indices[] = { 0,1,2 };
 	indexBuffer.UpdateData(indices, sizeof(uint32_t) * (sizeof(indices) / sizeof(indices[0])));
 
+	//ポストプロセス描画用
+	{
+		if (!rtDescriptorList.Init(&graphics, Resource::DescriptorList::RTV, 2)) {
+			return false;
+		}
+		float clearColor[4] = {0.1f,0.3f,0.5f,1.0f};
+		if (!preRenderTarget.Init(&graphics, windowWidth, windowHeight, DXGI_FORMAT_R8G8B8A8_UNORM, clearColor)) {
+			return false;
+		}
+		float posClearColor[4] = {0.0f,0.0f,0.0f,1.0f};
+		if (!posRenderTarget.renderTarget.Init(&graphics, windowWidth, windowHeight, DXGI_FORMAT_R32G32B32A32_FLOAT, posClearColor)) {
+			return false;
+		}
+
+		preRenderTargetDescriptorId = rtDescriptorList.AddRenderTargetView(&preRenderTarget);
+		posRenderTarget.rtDescriptorId = rtDescriptorList.AddRenderTargetView(&posRenderTarget.renderTarget);
+
+		preRTResourceDescriptorId = resourceDescriptorList.AddShaderResourceDescriptor(preRenderTarget.GetResource(), preRenderTarget.GetFormat());
+		posRenderTarget.resourceDescriptorId = resourceDescriptorList.AddShaderResourceDescriptor(posRenderTarget.renderTarget.GetResource(), posRenderTarget.renderTarget.GetFormat());
+		if (preRTResourceDescriptorId < 0) {
+			return false;
+		}
+		if (posRenderTarget.resourceDescriptorId < 0) {
+			return false;
+		}
+		Shader::InputLayout layout;
+		layout.AddElement("POSITION", Shader::InputLayout::Float, 4);
+		layout.AddElement("TEXCOORD", Shader::InputLayout::Float, 2);
+		Shader::Shader vs;
+		if (!vs.LoadShader(L"Res/PostVertexShader.hlsl", "vs_5_0", "main")) {
+			return false;
+		}
+		Shader::Shader ps;
+		if (!ps.LoadShader(L"Res/PostPixelShader.hlsl", "ps_5_0", "main")) {
+			return false;
+		}
+
+		Shader::RootSignatureFactory rsFactory;
+		rsFactory.AddResourceBlock(2, 0);
+		rsFactory.AddStaticSampler(0);
+		if (!rsFactory.Create(&graphics, postPipeline.rootSignature)) {
+			return false;
+		}
+
+		Shader::PipelineStateFactory psFactory;
+		psFactory.SetLayout(layout);
+		DXGI_FORMAT formats[] = { DXGI_FORMAT_R8G8B8A8_UNORM , };
+		psFactory.SetRenderTargets(1, formats);
+		psFactory.SetVertexShader(&vs);
+		psFactory.SetPixelShader(&ps);
+		psFactory.SetRootSignature(postPipeline.rootSignature.Get());
+		if (!psFactory.Create(&graphics, postPipeline.pso)) {
+			return false;
+		}
+		if (!postVertexBuffer.Init(&graphics, _countof(postVertex))) {
+			return false;
+		}
+		if (!postIndexBuffer.Init(&graphics, _countof(postIndices))) {
+			return false;
+		}
+		postVertexBuffer.Update(postVertex, sizeof(postVertex));
+		postIndexBuffer.UpdateData(postIndices, sizeof(postIndices));
+	}
 	return true;
 }
 
@@ -151,7 +265,8 @@ bool Render() {
 	Graphics& graphics = Graphics::GetInstance();
 
 	int currentBackBufferIndex = graphics.GetCurrentBackBufferIndex();
-	if (!graphicsCommand.Reset(&frameComponents[currentBackBufferIndex].allocator)) {
+	frameComponent.SetCurrent(currentBackBufferIndex);
+	if (!graphicsCommand.Reset(frameComponent.GetCommandAllocator())) {
 		return false;
 	}
 	Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList = graphicsCommand.GetCommandList();
@@ -164,12 +279,17 @@ bool Render() {
 			D3D12_RESOURCE_STATE_RENDER_TARGET
 
 		));
-	D3D12_CPU_DESCRIPTOR_HANDLE handle = graphics.GetRTVHandle(currentBackBufferIndex);
+	D3D12_CPU_DESCRIPTOR_HANDLE handle = rtDescriptorList.GetCpuHandle(preRenderTargetDescriptorId);
 	D3D12_CPU_DESCRIPTOR_HANDLE dsHandle = dsBuffer.GetHandle();
-	commandList->OMSetRenderTargets(1, &handle, FALSE, &dsHandle);
+	D3D12_CPU_DESCRIPTOR_HANDLE cpuHandles[] = {
+		handle,
+		rtDescriptorList.GetCpuHandle(posRenderTarget.rtDescriptorId),
+	};
+	commandList->OMSetRenderTargets(_countof(cpuHandles), cpuHandles, FALSE, &dsHandle);
 	float clearColor[] = { 0.1f,0.3f,0.5f,1.0f };
-	commandList->ClearRenderTargetView(handle, clearColor, 0, nullptr);
-	commandList->ClearDepthStencilView(dsHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+	commandList->ClearRenderTargetView(handle, preRenderTarget.GetClearColor(), 0, nullptr);
+	commandList->ClearRenderTargetView(rtDescriptorList.GetCpuHandle(posRenderTarget.rtDescriptorId), posRenderTarget.renderTarget.GetClearColor(), 0, nullptr);
+	commandList->ClearDepthStencilView(dsHandle, D3D12_CLEAR_FLAG_DEPTH, dsBuffer.GetDepthClearValue(), dsBuffer.GetStencilClearValue(), 0, nullptr);
 
 	D3D12_VIEWPORT viewport;
 	viewport.TopLeftX = 0;
@@ -198,6 +318,20 @@ bool Render() {
 	};
 	commandList->IASetVertexBuffers(0, 1, vbViews);
 	commandList->DrawInstanced(3, 1, 0, 0);
+
+	handle = frameComponent.GetRTVHandle();
+	commandList->OMSetRenderTargets(1, &handle, FALSE, nullptr);
+	float clear[] = {0.1f,0.1f,0.1f,1.0f};
+	commandList->ClearRenderTargetView(handle, clear, 0, nullptr);
+	postPipeline.Use(commandList);
+	commandList->SetGraphicsRootDescriptorTable(0, resourceDescriptorList.GetGpuHandle(preRTResourceDescriptorId));
+	D3D12_VERTEX_BUFFER_VIEW postVBViews[] = {
+		postVertexBuffer.GetView(),
+	};
+	commandList->IASetVertexBuffers(0, 1, postVBViews);
+	commandList->IASetIndexBuffer(&postIndexBuffer.GetView());
+	commandList->DrawIndexedInstanced(6, 1, 0, 0, 0);
+
 	commandList->ResourceBarrier(
 		1,
 		&CD3DX12_RESOURCE_BARRIER::Transition(

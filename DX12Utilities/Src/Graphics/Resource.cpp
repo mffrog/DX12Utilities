@@ -101,6 +101,8 @@ namespace Resource {
 		}
 		buffer->cpuHandle = heap->GetCpuHandle(id);
 		buffer->format = DXGI_FORMAT_D32_FLOAT;
+		buffer->depthClearValue = 1.0f;
+		buffer->stencilClearValue = 0;
 		return true;
 	}
 
@@ -133,6 +135,42 @@ namespace Resource {
 		if (pData) {
 			memcpy(pResourcePtr + offset * 0x100, pData, size);
 		}
+		return offset;
+	}
+	bool RenderTarget::Init(Graphics * graphics, int width, int height, DXGI_FORMAT format, const float* clearColor) {
+		D3D12_CLEAR_VALUE clear = {};
+		clear.Format = format;
+		for (int i = 0; i < 4; ++i) {
+			this->clearColor[i] = clearColor[i];
+			clear.Color[i] = clearColor[i];
+		}
+		if (FAILED(graphics->GetDevice()->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Tex2D(
+				format,
+				width, height,
+				1, 0, 1, 0,
+				D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
+			),
+			D3D12_RESOURCE_STATE_RENDER_TARGET,
+			&clear,
+			IID_PPV_ARGS(&resource)
+		))) {
+			return false;
+		}
+		this->format = format;
+		return true;
+	}
+	int RenderTargetDescriptorList::AddRenderTargetView(RenderTarget* renderTarget) {
+		D3D12_RENDER_TARGET_VIEW_DESC desc = {};
+		desc.Format = renderTarget->GetFormat();
+		desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+		D3D12_CPU_DESCRIPTOR_HANDLE handle = descriptorHeap->GetCPUDescriptorHandleForHeapStart();
+		handle.ptr += perDescriptorSize * index;
+		device->CreateRenderTargetView(renderTarget->GetResource().Get(), &desc, handle);
+		int offset = index;
+		++index;
 		return offset;
 	}
 } // namespace Resource

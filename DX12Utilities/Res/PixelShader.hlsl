@@ -1,9 +1,18 @@
 struct PSInput {
 	float4 position : SV_POSITION;
+	float4 pos : POSITION;
 	float4 color : COLOR;
 };
 
-float4 main(PSInput input) : SV_TARGET
+struct PSOutput {
+	float4 color : SV_TARGET0;
+	float4 position : SV_TARGET1;
+};
+
+PSOutput main(PSInput input)
 {
-	return input.color;
+	PSOutput output;
+	output.color = input.color;
+	output.position = (input.pos + float4(1.0f, 1.0f, 1.0f, 1.0f)) * 0.5f;
+	return output;
 }
